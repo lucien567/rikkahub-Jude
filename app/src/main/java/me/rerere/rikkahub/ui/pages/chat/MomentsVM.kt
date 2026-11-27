@@ -16,20 +16,23 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.MessageRole
-import me.rerere.ai.provider.Modality
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.ai.GenerationChunk
 import me.rerere.rikkahub.data.ai.GenerationHandler
-import me.rerere.rikkahub.data.ai.transformers.InputMessageTransformer
-import me.rerere.rikkahub.data.ai.transformers.OcrTransformer
+import me.rerere.rikkahub.data.ai.transformers.TemplateTransformer
+import me.rerere.rikkahub.data.ai.transformers.chatInputTransformers
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.data.model.MemoryScope
+import me.rerere.rikkahub.data.model.messagesForGeneration
+import me.rerere.rikkahub.data.voice.supportsImageInput
 import me.rerere.rikkahub.data.model.Conversation
-import me.rerere.rikkahub.data.model.memoryScope
+import me.rerere.rikkahub.data.voice.voiceCallSummaryPrompt
+import me.rerere.rikkahub.data.voice.withoutVoiceCallAudioTagsForNormalContext
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.data.repository.Moment
@@ -47,6 +50,7 @@ class MomentsVM(
     private val conversationRepository: ConversationRepository,
     private val memoryRepository: MemoryRepository,
     private val generationHandler: GenerationHandler,
+    private val templateTransformer: TemplateTransformer,
     val filesManager: FilesManager,
 ) : ViewModel() {
     private val _processing = MutableStateFlow(false)
@@ -88,6 +92,12 @@ class MomentsVM(
         }
     }
 
+    fun deleteUserMoment(assistantId: Uuid, momentId: Uuid) {
+        viewModelScope.launch {
+            momentRepository.deleteUserMoment(assistantId, momentId)
+        }
+    }
+
     fun addComment(momentId: Uuid, content: String) {
         if (content.isBlank()) return
         viewModelScope.launch {
@@ -99,7 +109,6 @@ class MomentsVM(
         assistantId: Uuid,
         assistant: Assistant,
         conversation: Conversation,
-        conversationSystemPrompt: String?,
         manual: Boolean = false,
     ) {
         viewModelScope.launch {
@@ -125,10 +134,10 @@ class MomentsVM(
                 }
                 val outcomes = buildList {
                     moments.forEach { moment ->
-                        add(processDueMoment(moment, assistant, generationConversation, conversationSystemPrompt))
+                        add(processDueMoment(moment, assistant, generationConversation))
                     }
                     comments.forEach { comment ->
-                        add(processDueComment(comment, assistant, generationConversation, conversationSystemPrompt))
+                        add(processDueComment(comment, assistant, generationConversation))
                     }
                 }
                 if (manual) {
@@ -156,12 +165,11 @@ class MomentsVM(
         moment: Moment,
         assistant: Assistant,
         conversation: Conversation,
-        conversationSystemPrompt: String?,
     ): MomentsProcessOutcome {
         val key = "moment:${moment.id}"
         if (!processingIds.add(key)) return MomentsProcessOutcome(MomentsProcessIssue.ALREADY_PROCESSING)
         try {
-            val result = generateMomentReaction(moment, assistant, conversation, conversationSystemPrompt)
+            val result = generateMomentReaction(moment, assistant, conversation)
             val reaction = when (result) {
                 MomentReactionGeneration.VisionModelSetupRequired -> {
                     _visionModelSetupRequired.emit(Unit)
@@ -206,7 +214,6 @@ class MomentsVM(
         comment: MomentComment,
         assistant: Assistant,
         conversation: Conversation,
-        conversationSystemPrompt: String?,
     ): MomentsProcessOutcome {
         val key = "comment:${comment.id}"
         if (!processingIds.add(key)) return MomentsProcessOutcome(MomentsProcessIssue.ALREADY_PROCESSING)
@@ -214,7 +221,7 @@ class MomentsVM(
             val moment = momentRepository.getMoment(comment.momentId)
                 ?: return MomentsProcessOutcome(MomentsProcessIssue.PERSISTENCE_FAILED)
             val comments = momentRepository.getComments(moment.id)
-            return when (val result = generateCommentReply(moment, comments, comment, assistant, conversation, conversationSystemPrompt)) {
+            return when (val result = generateCommentReply(moment, comments, comment, assistant, conversation)) {
                 CommentGenerationResult.EmptyText ->
                     MomentsProcessOutcome(MomentsProcessIssue.EMPTY_TEXT)
 
@@ -242,19 +249,16 @@ class MomentsVM(
         moment: Moment,
         assistant: Assistant,
         conversation: Conversation,
-        conversationSystemPrompt: String?,
     ): MomentReactionGeneration {
         val settings = settingsStore.settingsFlow.value
         val model = settings.findModelById(assistant.chatModelId ?: settings.chatModelId)
             ?: return MomentReactionGeneration.ModelUnavailable
         val requiresOcrFallback = moment.imageUris.isNotEmpty() &&
             moment.imageDescription.isBlank() &&
-            Modality.IMAGE !in model.inputModalities
+            !model.supportsImageInput()
         if (requiresOcrFallback && !settings.hasConfiguredVisionOcrModel()) {
             return MomentReactionGeneration.VisionModelSetupRequired
         }
-        val inputTransformers = if (requiresOcrFallback) listOf(OcrTransformer) else emptyList()
-        val memories = memoryRepository.getMemories(assistant.memoryScope(conversation.id))
         val timelineContext = buildTimelineContext(moment.assistantId, excludeMomentId = moment.id)
         val imageInstruction = if (moment.imageUris.isNotEmpty() && moment.imageDescription.isBlank()) {
             """
@@ -291,15 +295,11 @@ class MomentsVM(
             settings = settings,
             assistant = assistant,
             model = model,
-            conversationId = conversation.id,
-            memories = memories,
+            conversation = conversation,
             messages = listOf(UIMessage(
                 role = MessageRole.USER,
                 parts = parts,
             )),
-            inputTransformers = inputTransformers,
-            conversationSystemPrompt = conversationSystemPrompt,
-            conversationContextSummary = conversation.compressedSummary,
             maxTokens = 360,
         )
         if (text.isBlank()) return MomentReactionGeneration.EmptyText
@@ -319,12 +319,10 @@ class MomentsVM(
         target: MomentComment,
         assistant: Assistant,
         conversation: Conversation,
-        conversationSystemPrompt: String?,
     ): CommentGenerationResult {
         val settings = settingsStore.settingsFlow.value
         val model = settings.findModelById(assistant.chatModelId ?: settings.chatModelId)
             ?: return CommentGenerationResult.ModelUnavailable
-        val memories = memoryRepository.getMemories(assistant.memoryScope(conversation.id))
         val prompt = """
             Reply as the assistant in a Moments comment thread.
             Keep it natural and short. Return only the reply text, no JSON and no markdown.
@@ -346,11 +344,8 @@ class MomentsVM(
             settings = settings,
             assistant = assistant,
             model = model,
-            conversationId = conversation.id,
-            memories = memories,
+            conversation = conversation,
             messages = listOf(UIMessage.user(prompt)),
-            conversationSystemPrompt = conversationSystemPrompt,
-            conversationContextSummary = conversation.compressedSummary,
             maxTokens = 360,
         ).trim()
         return text.takeIf { it.isNotBlank() }
@@ -373,26 +368,31 @@ class MomentsVM(
         settings: Settings,
         assistant: me.rerere.rikkahub.data.model.Assistant,
         model: me.rerere.ai.provider.Model,
-        conversationId: Uuid,
-        memories: List<me.rerere.rikkahub.data.model.AssistantMemory>,
+        conversation: Conversation,
         messages: List<UIMessage>,
-        inputTransformers: List<InputMessageTransformer> = emptyList(),
-        conversationSystemPrompt: String?,
-        conversationContextSummary: String?,
         maxTokens: Int,
     ): String {
         var output = ""
+        val chatHistory = trimMomentsChatHistory(
+            conversation.messagesForGeneration()
+                .map(UIMessage::withoutVoiceCallAudioTagsForNormalContext)
+        )
         generationHandler.generateText(
             settings = settings,
             model = model,
-            conversationId = conversationId,
-            messages = messages,
-            inputTransformers = inputTransformers,
+            conversationId = conversation.id,
+            sessionIdOverride = "moments-${conversation.id}",
+            requestSource = "Moments",
+            messages = chatHistory + messages,
+            inputTransformers = chatInputTransformers + templateTransformer,
             assistant = assistant.copy(streamOutput = false),
-            conversationSystemPrompt = conversationSystemPrompt,
-            conversationContextSummary = conversationContextSummary,
-            memories = memories,
-            includeMemoriesInPrompt = true,
+            conversationSystemPrompt = conversation.customSystemPrompt,
+            conversationContextSummary = conversation.compressedSummary,
+            conversationModeInjectionIds = conversation.modeInjectionIds,
+            conversationLorebookIds = conversation.lorebookIds,
+            runtimeStateSystemPrompt = conversation.voiceCallSummaryPrompt(),
+            memories = memoryRepository.getMemories(MemoryScope.assistant(assistant.id)),
+            includeMemoriesInPrompt = assistant.enableMemory,
             tools = emptyList(),
             maxSteps = 1,
             maxTokensOverride = maxTokens,
@@ -504,10 +504,107 @@ private data class MomentsProcessOutcome(
         get() = issue == null || issue == MomentsProcessIssue.NO_VISIBLE_COMMENT
 }
 
-private fun Settings.hasConfiguredVisionOcrModel(): Boolean {
+internal fun Settings.hasConfiguredVisionOcrModel(): Boolean {
     val configuredModelSupportsImages = ocrModelId?.let(::findModelById)
-        ?.inputModalities
-        ?.contains(Modality.IMAGE) == true
+        ?.supportsImageInput() == true
     val customOcrModelConfigured = ocrOpenAIConfig.enabled && ocrOpenAIConfig.modelId.isNotBlank()
     return configuredModelSupportsImages || customOcrModelConfigured
+}
+
+internal fun trimMomentsChatHistory(
+    messages: List<UIMessage>,
+    maxMessages: Int = 20,
+): List<UIMessage> {
+    if (maxMessages <= 0 || messages.isEmpty()) return emptyList()
+    if (messages.size <= maxMessages) return messages
+
+    val minStart = messages.size - maxMessages
+    for (startIndex in minStart..messages.lastIndex) {
+        if (messages.isSafeMomentsUserTurnBoundary(startIndex)) {
+            return messages.subList(startIndex, messages.size)
+        }
+    }
+    return emptyList()
+}
+
+@Suppress("DEPRECATION")
+private fun List<UIMessage>.isSafeMomentsUserTurnBoundary(startIndex: Int): Boolean {
+    val candidate = this[startIndex]
+    if (candidate.role != MessageRole.USER || candidate.parts.any { it is UIMessagePart.ToolResult }) {
+        return false
+    }
+
+    val openIdsBefore = mutableSetOf<String>()
+    var openAnonymousBefore = 0
+    for (i in 0 until startIndex) {
+        for (part in this[i].parts) {
+            when (part) {
+                is UIMessagePart.Tool -> {
+                    if (!part.isExecuted) {
+                        if (part.toolCallId.isNotBlank()) openIdsBefore.add(part.toolCallId) else openAnonymousBefore++
+                    } else {
+                        if (part.toolCallId.isNotBlank()) openIdsBefore.remove(part.toolCallId) else if (openAnonymousBefore > 0) openAnonymousBefore--
+                    }
+                }
+
+                is UIMessagePart.ToolCall -> {
+                    if (part.toolCallId.isNotBlank()) openIdsBefore.add(part.toolCallId) else openAnonymousBefore++
+                }
+
+                is UIMessagePart.ToolResult -> {
+                    if (part.toolCallId.isNotBlank()) openIdsBefore.remove(part.toolCallId) else if (openAnonymousBefore > 0) openAnonymousBefore--
+                }
+
+                else -> Unit
+            }
+        }
+    }
+
+    if (openIdsBefore.isEmpty() && openAnonymousBefore == 0) return true
+
+    var openAnonymousInSuffix = 0
+    for (i in startIndex..lastIndex) {
+        val message = this[i]
+        var hasToolResultPart = false
+        for (part in message.parts) {
+            when (part) {
+                is UIMessagePart.Tool -> {
+                    if (!part.isExecuted) {
+                        if (part.toolCallId.isBlank()) openAnonymousInSuffix++
+                    } else if (part.toolCallId.isNotBlank()) {
+                        if (part.toolCallId in openIdsBefore) return false
+                    } else if (openAnonymousInSuffix > 0) {
+                        openAnonymousInSuffix--
+                    } else {
+                        return false
+                    }
+                }
+
+                is UIMessagePart.ToolCall -> {
+                    if (part.toolCallId.isBlank()) openAnonymousInSuffix++
+                }
+
+                is UIMessagePart.ToolResult -> {
+                    hasToolResultPart = true
+                    if (part.toolCallId.isNotBlank()) {
+                        if (part.toolCallId in openIdsBefore) return false
+                    } else if (openAnonymousInSuffix > 0) {
+                        openAnonymousInSuffix--
+                    } else {
+                        return false
+                    }
+                }
+
+                else -> Unit
+            }
+        }
+        if (message.role == MessageRole.TOOL && !hasToolResultPart) {
+            if (openAnonymousInSuffix > 0) {
+                openAnonymousInSuffix--
+            } else {
+                return false
+            }
+        }
+    }
+    return true
 }

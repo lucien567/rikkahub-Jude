@@ -9,9 +9,13 @@ import androidx.core.net.toUri
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.rerere.ai.ui.UIMessage
@@ -118,20 +122,30 @@ class FilesManager(
     fun getFile(entity: ManagedFileEntity): File =
         File(context.filesDir, entity.relativePath)
 
-    fun createChatFilesByContents(uris: List<Uri>): List<Uri> {
+    fun createChatFilesByContents(uris: List<Uri>): List<Uri> =
+        createChatFilesByContents(uris) { file, displayName, mimeType ->
+            trackManagedFile(FileFolders.UPLOAD, file, displayName, mimeType)
+        }
+
+    private fun createChatFilesByContents(
+        uris: List<Uri>,
+        onFileCopied: (File, String, String) -> Unit,
+    ): List<Uri> {
         val newUris = mutableListOf<Uri>()
         val dir = context.filesDir.resolve(FileFolders.UPLOAD)
         if (!dir.exists()) {
             dir.mkdirs()
         }
         uris.forEach { uri ->
+            var copiedFile: File? = null
+            var createdFile = false
             runCatching {
                 val sourceName = getFileNameFromUri(uri) ?: uri.lastPathSegment ?: "file"
                 val sourceMime = getFileMimeType(uri)
                 val fileName = buildUuidFileName(displayName = sourceName, mimeType = sourceMime)
-                val file = dir.resolve(fileName)
+                val file = dir.resolve(fileName).also { copiedFile = it }
                 if (!file.exists()) {
-                    file.createNewFile()
+                    createdFile = file.createNewFile()
                 }
                 val inputStream = context.contentResolver.openInputStream(uri)
                     ?: error("Failed to open input stream for $uri")
@@ -141,14 +155,10 @@ class FilesManager(
                     }
                 }
                 val guessedMime = sourceMime ?: guessMimeType(file, sourceName)
-                trackManagedFile(
-                    folder = FileFolders.UPLOAD,
-                    file = file,
-                    displayName = sourceName,
-                    mimeType = guessedMime
-                )
+                onFileCopied(file, sourceName, guessedMime)
                 newUris.add(file.toUri())
             }.onFailure {
+                if (createdFile) copiedFile?.delete()
                 it.printStackTrace()
                 Log.e(TAG, "createChatFilesByContents: Failed to save file from $uri", it)
                 Logging.log(
@@ -160,29 +170,65 @@ class FilesManager(
         return newUris
     }
 
-    fun createChatFilesByByteArrays(byteArrays: List<ByteArray>): List<Uri> {
+    suspend fun createChatFilesByContentsOnIo(uris: List<Uri>): List<Uri> {
+        val copiedRelativePaths = mutableListOf<String>()
+        val trackingJobs = mutableListOf<Job>()
+        return try {
+            withContext(Dispatchers.IO) {
+                createChatFilesByContents(uris) { file, displayName, mimeType ->
+                    copiedRelativePaths.add(buildRelativePath(FileFolders.UPLOAD, file))
+                    trackingJobs.add(trackManagedFile(FileFolders.UPLOAD, file, displayName, mimeType))
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            withContext(NonCancellable + Dispatchers.IO) {
+                trackingJobs.joinAll()
+                copiedRelativePaths.forEach { relativePath ->
+                    runCatching {
+                        File(context.filesDir, relativePath).delete()
+                        repository.deleteByPath(relativePath)
+                    }.onFailure { error ->
+                        Log.e(TAG, "createChatFilesByContentsOnIo: Failed to clean cancelled import", error)
+                    }
+                }
+            }
+            throw cancelled
+        }
+    }
+
+    fun createChatFilesByByteArrays(
+        byteArrays: List<ByteArray>,
+        displayName: String = "image.png",
+        mimeType: String = "image/png",
+    ): List<Uri> {
         val newUris = mutableListOf<Uri>()
         val dir = context.filesDir.resolve(FileFolders.UPLOAD)
-        if (!dir.exists()) {
-            dir.mkdirs()
-        }
         byteArrays.forEach { byteArray ->
-            val fileName = buildUuidFileName(displayName = "image.png", mimeType = "image/png")
-            val file = dir.resolve(fileName)
-            if (!file.exists()) {
+            var file: File? = null
+            try {
+                if (!dir.exists() && !dir.mkdirs() && !dir.exists()) {
+                    error("Failed to create upload directory")
+                }
+                file = dir.resolve(buildUuidFileName(displayName = displayName, mimeType = mimeType))
                 file.createNewFile()
+                file.outputStream().use { outputStream ->
+                    outputStream.write(byteArray)
+                }
+                trackManagedFile(
+                    folder = FileFolders.UPLOAD,
+                    file = file,
+                    displayName = displayName,
+                    mimeType = mimeType
+                )
+                newUris.add(file.toUri())
+            } catch (error: Exception) {
+                file?.takeIf { it.exists() }?.delete()
+                Log.e(TAG, "createChatFilesByByteArrays: Failed to save image", error)
+                Logging.log(
+                    TAG,
+                    "createChatFilesByByteArrays: Failed to save image ${error::class.simpleName ?: "Exception"}"
+                )
             }
-            val newUri = file.toUri()
-            file.outputStream().use { outputStream ->
-                outputStream.write(byteArray)
-            }
-            trackManagedFile(
-                folder = FileFolders.UPLOAD,
-                file = file,
-                displayName = "image.png",
-                mimeType = "image/png"
-            )
-            newUris.add(newUri)
         }
         return newUris
     }
@@ -450,9 +496,9 @@ class FilesManager(
         )
     }
 
-    private fun trackManagedFile(folder: String, file: File, displayName: String, mimeType: String) {
+    private fun trackManagedFile(folder: String, file: File, displayName: String, mimeType: String): Job {
         val relativePath = buildRelativePath(folder, file)
-        appScope.launch(Dispatchers.IO) {
+        return appScope.launch(Dispatchers.IO) {
             runCatching {
                 val existing = repository.getByPath(relativePath)
                 if (existing != null) {

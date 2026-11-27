@@ -22,6 +22,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.BuildConfig
 import me.rerere.rikkahub.data.datastore.DisplaySetting
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.components.ui.CardGroup
@@ -76,7 +77,7 @@ fun SettingPreferencesNotificationPage(vm: SettingVM = koinViewModel()) {
                 CardGroup(
                     modifier = Modifier.padding(horizontal = 8.dp),
                 ) {
-                    item(
+                    if (BuildConfig.FLAVOR != "home") item(
                         headlineContent = { Text(stringResource(R.string.setting_display_page_show_updates_title)) },
                         supportingContent = { Text(stringResource(R.string.setting_display_page_show_updates_desc)) },
                         trailingContent = {

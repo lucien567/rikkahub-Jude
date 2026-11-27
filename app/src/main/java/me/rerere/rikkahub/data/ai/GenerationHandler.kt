@@ -26,6 +26,7 @@ import me.rerere.ai.provider.OpenAIAuthType
 import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.GoogleAuthType
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.SYSTEM_PROMPT_DYNAMIC_SECTION
@@ -46,6 +47,7 @@ import me.rerere.rikkahub.data.ai.transformers.onGenerationFinish
 import me.rerere.rikkahub.data.ai.transformers.transforms
 import me.rerere.rikkahub.data.ai.transformers.visualTransforms
 import me.rerere.rikkahub.data.ai.tools.buildMemoryTools
+import me.rerere.rikkahub.data.ai.gemini.withGeminiSubscriptionCompressedSummary
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.data.datastore.findProvider
@@ -99,6 +101,7 @@ class GenerationHandler(
         conversationLorebookIds: Set<Uuid> = emptySet(),
         extraSystemPrompt: String? = null,
         runtimeStateSystemPrompt: String? = null,
+        runtimeUserContextPrompt: String? = null,
         requestMessageParts: List<UIMessagePart> = emptyList(),
         requestMessagePartsEnabled: suspend () -> Boolean = { true },
         disabledToolNames: Set<String> = emptySet(),
@@ -206,6 +209,7 @@ class GenerationHandler(
                         conversationLorebookIds = conversationLorebookIds,
                         extraSystemPrompt = extraSystemPrompt,
                         runtimeStateSystemPrompt = runtimeStateSystemPrompt,
+                        runtimeUserContextPrompt = runtimeUserContextPrompt,
                         requestMessageParts = requestMessageParts.onlyWhile(requestMessagePartsEnabled),
                         maxTokensOverride = maxTokensOverride,
                         conversationId = conversationId,
@@ -430,6 +434,7 @@ class GenerationHandler(
         conversationLorebookIds: Set<Uuid> = emptySet(),
         extraSystemPrompt: String? = null,
         runtimeStateSystemPrompt: String? = null,
+        runtimeUserContextPrompt: String? = null,
         requestMessageParts: List<UIMessagePart> = emptyList(),
         maxTokensOverride: Int? = null,
         conversationId: Uuid? = null,
@@ -466,7 +471,9 @@ class GenerationHandler(
                 }
         }
         val effectiveSystemPrompt = if (systemPromptIsPresetSlot) "" else configuredSystemPrompt
-        val internalMessages = buildList {
+        val moveCompressedSummaryToTail = provider is ProviderSetting.Google &&
+            provider.authType == GoogleAuthType.GEMINI_SUBSCRIPTION
+        val systemMessages = buildList {
             val dynamicSystemPrompt = buildString {
                 if (!extraSystemPrompt.isNullOrBlank()) {
                     if (effectiveSystemPrompt.isNotBlank()) {
@@ -475,7 +482,7 @@ class GenerationHandler(
                     }
                     append(extraSystemPrompt)
                 }
-                if (!conversationContextSummary.isNullOrBlank()) {
+                if (!moveCompressedSummaryToTail && !conversationContextSummary.isNullOrBlank()) {
                     appendLine()
                     appendLine()
                     append("The following is a compressed summary of earlier messages in this conversation. ")
@@ -516,9 +523,9 @@ class GenerationHandler(
                 }
                 add(UIMessage(role = MessageRole.SYSTEM, parts = parts))
             }
-            // Response accumulation uses `messages`, keeping request-only state out of storage/UI.
-            addAll(contextMessages)
-        }.transforms(
+        }
+        // Response accumulation uses `messages`, keeping request-only state out of storage/UI.
+        val internalMessages = (systemMessages + contextMessages).transforms(
             transformers = transformers,
             context = context,
             model = model,
@@ -530,7 +537,9 @@ class GenerationHandler(
             processingStatus = processingStatus,
             onWarning = onInputWarning,
         ).withRequestMessageParts(requestMessageParts)
+            .withRuntimeUserContext(runtimeUserContextPrompt)
             .withRuntimeContextInstruction(runtimeStateSystemPrompt)
+            .withGeminiSubscriptionCompressedSummary(provider, conversationContextSummary)
             .let { requestMessages ->
                 if (projectGeminiRelayToolHistory) requestMessages.withToolHistoryAsText() else requestMessages
             }
@@ -544,6 +553,34 @@ class GenerationHandler(
         if (responseMessages.lastOrNull()?.id != messages.lastOrNull()?.id) {
             timing.mark("assistant_response_started", responseMessages.last().id.toString(), 0)
         }
+        val effectiveSessionId = sessionIdOverride?.takeIf { it.isNotBlank() }
+            ?: conversationId?.toString()
+        val moveMessagesAfterTools = shouldOptimizeGeminiRelayCache(
+            enabled = settings.sendSessionIdForApiKey,
+            provider = provider,
+            model = model,
+        )
+        val headers = buildList {
+            addAll(assistant.customHeaders)
+            addAll(model.customHeaders)
+            if (provider is ProviderSetting.OpenAI &&
+                provider.authType == OpenAIAuthType.CHATGPT_SUBSCRIPTION &&
+                effectiveSessionId != null
+            ) {
+                removeAll { it.name.equals("session-id", ignoreCase = true) }
+                add(CustomHeader("session-id", effectiveSessionId))
+            }
+        }
+        val body = buildList {
+            addAll(assistant.customBodies)
+            addAll(model.customBodies)
+        }
+        val geminiCacheOverrides = if (moveMessagesAfterTools) {
+            applyGeminiRelayCacheSessionId(headers, body, effectiveSessionId)
+        } else {
+            GeminiRelayCacheOverrides(headers, body)
+        }
+        val sessionHeaders = geminiCacheOverrides.headers.filter { it.name.equals("session-id", ignoreCase = true) }
         val params = TextGenerationParams(
             model = model,
             temperature = assistant.temperature,
@@ -551,26 +588,23 @@ class GenerationHandler(
             maxTokens = maxTokensOverride ?: assistant.maxTokens,
             tools = tools,
             suppressContentLogs = suppressContentLogs,
-            onRequestPrepared = diagnosticTrace?.let { it::request },
-            onTokenUsage = diagnosticTrace?.let { it::usage },
-            reasoningLevel = assistant.reasoningLevel,
-            customHeaders = buildList {
-                addAll(assistant.customHeaders)
-                addAll(model.customHeaders)
-                val effectiveSessionId = sessionIdOverride?.takeIf { it.isNotBlank() }
-                    ?: conversationId?.toString()
-                if (provider is ProviderSetting.OpenAI &&
-                    provider.authType == OpenAIAuthType.CHATGPT_SUBSCRIPTION &&
-                    effectiveSessionId != null
-                ) {
-                    removeAll { it.name.equals("session-id", ignoreCase = true) }
-                    add(CustomHeader("session-id", effectiveSessionId))
+            onRequestPrepared = diagnosticTrace?.let { trace ->
+                { requestBody ->
+                    trace.request(
+                        requestBody,
+                        moveMessagesAfterTools,
+                        sessionHeaders.count(),
+                        effectiveSessionId != null && sessionHeaders.any { it.value == effectiveSessionId },
+                        effectiveSessionId,
+                    )
                 }
             },
-            customBody = buildList {
-                addAll(assistant.customBodies)
-                addAll(model.customBodies)
-            }
+            onTokenUsage = diagnosticTrace?.let { it::usage },
+            reasoningLevel = assistant.reasoningLevel,
+            customHeaders = geminiCacheOverrides.headers,
+            customBody = geminiCacheOverrides.body,
+            moveMessagesAfterTools = moveMessagesAfterTools,
+            sessionId = effectiveSessionId,
         )
         timing.mark("model_request_prepared")
         voiceCallTiming?.markOnce("model_request_prepared")
@@ -616,7 +650,8 @@ class GenerationHandler(
             responseMessages = responseMessages.handleMessageChunk(chunk = chunk, model = model)
             chunk.usage?.let { usage ->
                 Log.i("PromptCacheUsage", "conversation=$conversationId model=${model.modelId} " +
-                    "promptTokens=${usage.promptTokens} cachedTokens=${usage.cachedTokens}")
+                    "promptTokens=${usage.promptTokens} cachedTokens=${usage.cachedTokens} " +
+                    "cachedTokensReported=${usage.cachedTokensReported}")
                 responseMessages = responseMessages.mapIndexed { index, message ->
                     if (index == responseMessages.lastIndex) {
                         message.copy(usage = message.usage.merge(usage))
@@ -720,7 +755,8 @@ internal fun shouldProjectGeminiRelayToolHistory(model: Model, provider: Provide
 
 private fun ProviderSetting.isOfficialGeminiEndpoint(): Boolean = when (this) {
     // Vertex requests use Google's hard-coded aiplatform.googleapis.com endpoint.
-    is ProviderSetting.Google -> vertexAI || baseUrl.isOfficialGeminiApiBaseUrl()
+    is ProviderSetting.Google -> authType == GoogleAuthType.GEMINI_SUBSCRIPTION ||
+        vertexAI || baseUrl.isOfficialGeminiApiBaseUrl()
     is ProviderSetting.OpenAI -> baseUrl.isOfficialGeminiApiBaseUrl()
 
     else -> false

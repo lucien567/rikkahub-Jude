@@ -9,6 +9,7 @@ This is a **separate development APK** built from Jude, not yet a replacement fo
 - `homeDebug` installs as `io.github.lucien567.lucienhome.debug`, independently of Jude.
 - All existing chat, providers, assistants, memory and tools remain intact. No private Home history, secrets or personalization is committed.
 - The original Jude icon and in-app branding have **not** been replaced yet.
+- Home does not check for or download Jude releases. Update Home using a separately built APK with the same signing certificate.
 
 ## Build on Windows
 

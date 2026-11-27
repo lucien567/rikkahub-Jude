@@ -78,14 +78,10 @@ import me.rerere.rikkahub.data.ai.tools.LocalToolOption
 import me.rerere.rikkahub.data.ai.tools.REQUEST_VOICE_CALL_TOOL_NAME
 import me.rerere.rikkahub.data.ai.tools.ChatToolFactory
 import me.rerere.rikkahub.data.ai.transformers.Base64ImageToLocalFileTransformer
-import me.rerere.rikkahub.data.ai.transformers.DocumentAsPromptTransformer
-import me.rerere.rikkahub.data.ai.transformers.OcrTransformer
-import me.rerere.rikkahub.data.ai.transformers.PlaceholderTransformer
-import me.rerere.rikkahub.data.ai.transformers.PromptInjectionTransformer
+import me.rerere.rikkahub.data.ai.transformers.chatInputTransformers
 import me.rerere.rikkahub.data.ai.transformers.RegexOutputTransformer
 import me.rerere.rikkahub.data.ai.transformers.TemplateTransformer
 import me.rerere.rikkahub.data.ai.transformers.ThinkTagTransformer
-import me.rerere.rikkahub.data.ai.transformers.TimeReminderTransformer
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.findModelById
@@ -168,7 +164,7 @@ private const val MIN_COMPRESSION_CHUNK_TOKENS = 8000
 private const val COMPRESSION_CHUNK_TOKENS_PER_TARGET_TOKEN = 8
 private const val VOICE_CALL_SYSTEM_PROMPT_COMMON = """
 你正在语音通话模式中回复用户。
-不要再次发起、邀请、请求或切换到另一通语音通话，也不要调用打电话工具。
+不要再次发起、邀请、请求或切换到另一通语音通话，也不要调用 request_voice_call、generate_image 或 text_to_speech 工具。
 如果用户的表达暗示想打电话，只需在当前通话中继续回应，不要把它当成新的拨号请求。
 请像真实电话聊天一样自然、简短、连贯地说话。
 每一句都尽量短，适合一句一句朗读。
@@ -225,16 +221,6 @@ data class GenerationDoneEvent(
 
 enum class ChatErrorSolution {
     CheckTitleModelSettings,
-}
-
-private val inputTransformers by lazy {
-    listOf(
-        TimeReminderTransformer,
-        PromptInjectionTransformer,
-        PlaceholderTransformer,
-        DocumentAsPromptTransformer,
-        OcrTransformer,
-    )
 }
 
 private val outputTransformers by lazy {
@@ -472,6 +458,8 @@ class ChatService(
         requestMode: ChatRequestMode = ChatRequestMode.Normal,
         includeVoiceCallConnectedEvent: Boolean = false,
         requestMessagePartsProvider: (suspend () -> List<UIMessagePart>)? = null,
+        voiceCallArchiveImageBytesProvider: (suspend () -> List<ByteArray>)? = null,
+        onVoiceCallArchiveImagesSaved: (() -> Unit)? = null,
         onVoiceCallVisualSendStatus: ((VoiceCallVisualSendStatus) -> Unit)? = null,
         voiceCallInputTiming: GenerationTimingTrace? = null,
     ) {
@@ -512,18 +500,40 @@ class ChatService(
                 val processedContent = preprocessUserInputParts(content, assistant)
                 timing?.mark("user_input_preprocess_finished")
 
+                val voiceCallImageAnnotations = if (requestMode == ChatRequestMode.VoiceCall) {
+                    val imageBytes = voiceCallArchiveImageBytesProvider?.invoke().orEmpty()
+                    try {
+                        filesManager.createChatFilesByByteArrays(
+                            byteArrays = imageBytes,
+                            displayName = "voice-call-screenshot.jpg",
+                            mimeType = "image/jpeg",
+                        ).map { uri ->
+                            UIMessageAnnotation.VoiceCallImageAttachment(uri.toString())
+                        }
+                    } finally {
+                        imageBytes.forEach { it.fill(0) }
+                    }
+                } else emptyList()
+
                 // 添加消息到列表
                 val userMessage = UIMessage(
                     role = MessageRole.USER,
                     parts = processedContent,
+                    annotations = voiceCallImageAnnotations,
                 )
                 timing?.mark("user_message_save_started", userMessage.id.toString())
-                mutateConversation(conversationId) { latest ->
-                    val consumption = if (answer && requestMode == ChatRequestMode.Normal) latest.consumePendingVoiceCallEndedEvent() else null
-                    notifyEndedEvent = consumption?.shouldNotifyModel == true
-                    val base = consumption?.conversation ?: latest
-                    base.copy(messageNodes = base.messageNodes + userMessage.toMessageNode(), updateAt = Instant.now())
+                try {
+                    mutateConversation(conversationId) { latest ->
+                        val consumption = if (answer && requestMode == ChatRequestMode.Normal) latest.consumePendingVoiceCallEndedEvent() else null
+                        notifyEndedEvent = consumption?.shouldNotifyModel == true
+                        val base = consumption?.conversation ?: latest
+                        base.copy(messageNodes = base.messageNodes + userMessage.toMessageNode(), updateAt = Instant.now())
+                    }
+                } catch (error: Exception) {
+                    filesManager.deleteChatFiles(voiceCallImageAnnotations.map { it.uri.toUri() })
+                    throw error
                 }
+                onVoiceCallArchiveImagesSaved?.invoke()
                 timing?.mark("user_message_save_finished", userMessage.id.toString())
                 timing?.mark("user_message_hook_started")
                 LocalBuildIntegration.onUserMessageSent(
@@ -818,6 +828,9 @@ class ChatService(
                         val hasAiContent = completedCallMessages.any { message ->
                             message.role == MessageRole.ASSISTANT && message.toText().isNotBlank()
                         }
+                        val hasArchivedImages = completedCallMessages.any { message ->
+                            message.annotations.any { it is UIMessageAnnotation.VoiceCallImageAttachment }
+                        }
                         if (hasVoiceCallConversation) {
                             val recordNode = UIMessage(
                                 role = MessageRole.ASSISTANT,
@@ -826,9 +839,9 @@ class ChatService(
                                     UIMessageAnnotation.VoiceCallRecord(
                                         callId = completion.callId,
                                         durationSeconds = completion.durationSeconds,
-                                        cardAnchor = hasAiContent,
+                                        cardAnchor = hasAiContent || hasArchivedImages,
                                         standalone = true,
-                                        messageIds = if (hasAiContent) completion.messageIds else emptySet(),
+                                        messageIds = completion.messageIds,
                                         audioSegmentsByMessageId = completion.audioSegmentsByMessageId,
                                         pendingEndedEvent = true,
                                     )
@@ -954,8 +967,8 @@ class ChatService(
             // check invalid messages
             checkInvalidMessages(conversationId)
             val conversation = getConversationFlow(conversationId).value
-            val voiceCallRuntimeContext = buildVoiceCallRuntimeContext(
-                voiceCallRuntimeState,
+            val voiceCallRuntimePrompt = buildVoiceCallRuntimeRequestPrompt(
+                state = voiceCallRuntimeState,
                 includeConnectionEvent = voiceCallUserEventState != null,
             )
             val voiceCallAudioTagFormat = settings.getSelectedTTSProvider()
@@ -1010,9 +1023,27 @@ class ChatService(
 
                 else -> null
             }
+            val runtimeUserContextPrompt = listOfNotNull(
+                voiceCallRuntimePrompt,
+                if (requestMode == ChatRequestMode.VoiceCall) listOf(
+                    VOICE_CALL_SYSTEM_PROMPT_COMMON.trimIndent(),
+                    buildVoiceCallAudioTagPrompt(
+                        voiceCallAudioTagMode,
+                        voiceCallAudioTagFormat,
+                        settings.elevenLabsVoiceDirectorPrompt,
+                    ),
+                ).joinToString("\n\n") else null,
+                momentContextPrompt,
+                anonymousQuestionContextPrompt,
+            ).joinToString("\n\n").takeIf { it.isNotBlank() }
+            val runtimeStateSystemPrompt = listOfNotNull(
+                conversation.voiceCallSummaryPrompt(messageRange),
+                additionalSystemPrompt,
+            ).joinToString("\n\n").takeIf { it.isNotBlank() }
             var voiceCallFailureReported = false
             Log.i("PromptCacheContext", "conversation=$conversationId requestMode=$requestMode runtimeState=$voiceCallRuntimeState " +
-                "connectionEvent=${voiceCallUserEventState != null} historyProjection=spoken_text runtimePlacement=tail")
+                "connectionEvent=${voiceCallUserEventState != null} historyProjection=spoken_text " +
+                "runtimePlacement=${if (runtimeUserContextPrompt != null) "last_user" else "none"}")
             val generationFlow = generationHandler.generateText(
                 requestMessageParts = requestMessageParts,
                 requestMessagePartsEnabled = {
@@ -1037,9 +1068,9 @@ class ChatService(
                 messages = generationMessages,
                 startNewAssistantMessage = requestMode == ChatRequestMode.VoiceCall,
                 assistant = if (requestMode == ChatRequestMode.VoiceCall &&
-                    (settings.getSelectedTTSProvider() as? TTSProviderSetting.ElevenLabs)?.let {
+                    ((settings.getSelectedTTSProvider() as? TTSProviderSetting.ElevenLabs)?.let {
                         it.fullDuplex && it.isElevenLabsV4Family()
-                    } == true
+                    } == true || settings.getSelectedTTSProvider() is TTSProviderSetting.FishAudio)
                 ) assistant.copy(streamOutput = true) else assistant,
                 conversationId = conversation.id,
                 requestSource = requestMode.name,
@@ -1048,17 +1079,8 @@ class ChatService(
                 conversationContextSummary = conversation.compressedSummary,
                 conversationModeInjectionIds = conversation.modeInjectionIds,
                 conversationLorebookIds = conversation.lorebookIds,
-                runtimeStateSystemPrompt = listOfNotNull(
-                    voiceCallRuntimeContext.systemPrompt,
-                    if (requestMode == ChatRequestMode.VoiceCall) listOf(
-                        VOICE_CALL_SYSTEM_PROMPT_COMMON.trimIndent(),
-                        buildVoiceCallAudioTagPrompt(voiceCallAudioTagMode, voiceCallAudioTagFormat, settings.elevenLabsVoiceDirectorPrompt),
-                    ).joinToString("\n\n") else null,
-                    conversation.voiceCallSummaryPrompt(messageRange),
-                    momentContextPrompt,
-                    anonymousQuestionContextPrompt,
-                    additionalSystemPrompt,
-                ).joinToString("\n\n"),
+                runtimeStateSystemPrompt = runtimeStateSystemPrompt,
+                runtimeUserContextPrompt = runtimeUserContextPrompt,
                 disabledToolNames = if (voiceCallRuntimeState == VoiceCallRuntimeState.ENDED) {
                     setOf(REQUEST_VOICE_CALL_TOOL_NAME)
                 } else emptySet(),
@@ -1073,7 +1095,7 @@ class ChatService(
                     addAll(memoryRepository.getMemories(MemoryScope.assistant(assistant.id)))
                 },
                 inputTransformers = buildList {
-                    addAll(inputTransformers)
+                    addAll(chatInputTransformers)
                     add(templateTransformer)
                 },
                 outputTransformers = outputTransformers,

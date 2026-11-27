@@ -32,6 +32,7 @@ import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.isEmptyInputMessage
 import me.rerere.ai.util.GenerationTimingTrace
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.BuildConfig
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.mergeSettingsUpdate
 import me.rerere.rikkahub.data.datastore.SettingsStore
@@ -128,18 +129,19 @@ class ChatVM(
             }
         }
 
-        updateChecker.restoreDownloadState(context)
-        ProcessLifecycleOwner.get().lifecycle.addObserver(updateLifecycleObserver)
-
-        viewModelScope.launch {
-            if (settingsStore.settingsFlow.first { !it.init }.displaySetting.showUpdates) return@launch
-            settingsStore.update { settings ->
-                if (settings.displaySetting.showUpdates) {
-                    settings
-                } else {
-                    settings.copy(
-                        displaySetting = settings.displaySetting.copy(showUpdates = true)
-                    )
+        if (BuildConfig.FLAVOR != "home") {
+            updateChecker.restoreDownloadState(context)
+            ProcessLifecycleOwner.get().lifecycle.addObserver(updateLifecycleObserver)
+            viewModelScope.launch {
+                if (settingsStore.settingsFlow.first { !it.init }.displaySetting.showUpdates) return@launch
+                settingsStore.update { settings ->
+                    if (settings.displaySetting.showUpdates) {
+                        settings
+                    } else {
+                        settings.copy(
+                            displaySetting = settings.displaySetting.copy(showUpdates = true)
+                        )
+                    }
                 }
             }
         }
@@ -243,6 +245,8 @@ class ChatVM(
         requestMode: ChatRequestMode = ChatRequestMode.Normal,
         includeVoiceCallConnectedEvent: Boolean = false,
         requestMessagePartsProvider: (suspend () -> List<UIMessagePart>)? = null,
+        voiceCallArchiveImageBytesProvider: (suspend () -> List<ByteArray>)? = null,
+        onVoiceCallArchiveImagesSaved: (() -> Unit)? = null,
         onVoiceCallVisualSendStatus: ((VoiceCallVisualSendStatus) -> Unit)? = null,
         voiceCallInputTiming: GenerationTimingTrace? = null,
     ) {
@@ -256,6 +260,8 @@ class ChatVM(
             requestMode = requestMode,
             includeVoiceCallConnectedEvent = includeVoiceCallConnectedEvent,
             requestMessagePartsProvider = requestMessagePartsProvider,
+            voiceCallArchiveImageBytesProvider = voiceCallArchiveImageBytesProvider,
+            onVoiceCallArchiveImagesSaved = onVoiceCallArchiveImagesSaved,
             onVoiceCallVisualSendStatus = onVoiceCallVisualSendStatus,
             voiceCallInputTiming = voiceCallInputTiming,
         )
