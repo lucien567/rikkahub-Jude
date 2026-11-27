@@ -45,6 +45,15 @@ android {
             buildConfigField("String", "VERSION_NAME", "\"${android.defaultConfig.versionName}\"")
             buildConfigField("String", "VERSION_CODE", "\"${android.defaultConfig.versionCode}\"")
         }
+        // Personal Home test build; keep Jude public/personal variants unchanged.
+        create("home") {
+            dimension = "distribution"
+            applicationId = "io.github.lucien567.lucienhome"
+            versionCode = 1
+            versionName = "0.1.0-dev"
+            buildConfigField("String", "VERSION_NAME", "\"0.1.0-dev\"")
+            buildConfigField("String", "VERSION_CODE", "\"1\"")
+        }
     }
 
     splits {
