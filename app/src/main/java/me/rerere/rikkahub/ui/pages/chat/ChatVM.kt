@@ -32,6 +32,7 @@ import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.isEmptyInputMessage
 import me.rerere.ai.util.GenerationTimingTrace
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.BuildConfig
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.mergeSettingsUpdate
 import me.rerere.rikkahub.data.datastore.SettingsStore
@@ -69,7 +70,7 @@ class ChatVM(
     private val conversationRepo: ConversationRepository,
     private val chatService: ChatService,
     val updateChecker: UpdateChecker,
-    private val analytics: FirebaseAnalytics,
+    private val analytics: FirebaseAnalytics?,
     private val filesManager: FilesManager,
     private val favoriteRepository: FavoriteRepository,
 ) : ViewModel() {
@@ -128,18 +129,19 @@ class ChatVM(
             }
         }
 
-        updateChecker.restoreDownloadState(context)
-        ProcessLifecycleOwner.get().lifecycle.addObserver(updateLifecycleObserver)
-
-        viewModelScope.launch {
-            if (settingsStore.settingsFlow.first { !it.init }.displaySetting.showUpdates) return@launch
-            settingsStore.update { settings ->
-                if (settings.displaySetting.showUpdates) {
-                    settings
-                } else {
-                    settings.copy(
-                        displaySetting = settings.displaySetting.copy(showUpdates = true)
-                    )
+        if (BuildConfig.FLAVOR != "home") {
+            updateChecker.restoreDownloadState(context)
+            ProcessLifecycleOwner.get().lifecycle.addObserver(updateLifecycleObserver)
+            viewModelScope.launch {
+                if (settingsStore.settingsFlow.first { !it.init }.displaySetting.showUpdates) return@launch
+                settingsStore.update { settings ->
+                    if (settings.displaySetting.showUpdates) {
+                        settings
+                    } else {
+                        settings.copy(
+                            displaySetting = settings.displaySetting.copy(showUpdates = true)
+                        )
+                    }
                 }
             }
         }
@@ -243,11 +245,13 @@ class ChatVM(
         requestMode: ChatRequestMode = ChatRequestMode.Normal,
         includeVoiceCallConnectedEvent: Boolean = false,
         requestMessagePartsProvider: (suspend () -> List<UIMessagePart>)? = null,
+        voiceCallArchiveImageBytesProvider: (suspend () -> List<ByteArray>)? = null,
+        onVoiceCallArchiveImagesSaved: (() -> Unit)? = null,
         onVoiceCallVisualSendStatus: ((VoiceCallVisualSendStatus) -> Unit)? = null,
         voiceCallInputTiming: GenerationTimingTrace? = null,
     ) {
         if (content.isEmptyInputMessage()) return
-        analytics.logEvent("ai_send_message", null)
+        analytics?.logEvent("ai_send_message", null)
 
         chatService.sendMessage(
             conversationId = _conversationId,
@@ -256,6 +260,8 @@ class ChatVM(
             requestMode = requestMode,
             includeVoiceCallConnectedEvent = includeVoiceCallConnectedEvent,
             requestMessagePartsProvider = requestMessagePartsProvider,
+            voiceCallArchiveImageBytesProvider = voiceCallArchiveImageBytesProvider,
+            onVoiceCallArchiveImagesSaved = onVoiceCallArchiveImagesSaved,
             onVoiceCallVisualSendStatus = onVoiceCallVisualSendStatus,
             voiceCallInputTiming = voiceCallInputTiming,
         )
@@ -263,7 +269,7 @@ class ChatVM(
 
     fun handleMessageEdit(parts: List<UIMessagePart>, messageId: Uuid) {
         if (parts.isEmptyInputMessage()) return
-        analytics.logEvent("ai_edit_message", null)
+        analytics?.logEvent("ai_edit_message", null)
 
         viewModelScope.launch {
             chatService.editMessage(_conversationId, messageId, parts)
@@ -376,7 +382,7 @@ class ChatVM(
         message: UIMessage,
         regenerateAssistantMsg: Boolean = true
     ) {
-        analytics.logEvent("ai_regenerate_at_message", null)
+        analytics?.logEvent("ai_regenerate_at_message", null)
         chatService.regenerateAtMessage(_conversationId, message, regenerateAssistantMsg)
     }
 
@@ -385,7 +391,7 @@ class ChatVM(
         approved: Boolean,
         reason: String = ""
     ) {
-        analytics.logEvent("ai_tool_approval", null)
+        analytics?.logEvent("ai_tool_approval", null)
         chatService.handleToolApproval(_conversationId, toolCallId, approved, reason)
     }
 
@@ -393,7 +399,7 @@ class ChatVM(
         toolCallId: String,
         answer: String,
     ) {
-        analytics.logEvent("ai_tool_answer", null)
+        analytics?.logEvent("ai_tool_answer", null)
         chatService.handleToolApproval(_conversationId, toolCallId, approved = true, answer = answer)
     }
 

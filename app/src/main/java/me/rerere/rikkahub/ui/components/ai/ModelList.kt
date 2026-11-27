@@ -4,6 +4,7 @@ import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
@@ -83,6 +84,7 @@ import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.ui.components.ui.AutoAIIcon
 import me.rerere.rikkahub.ui.components.ui.Tag
 import me.rerere.rikkahub.ui.components.ui.TagType
+import me.rerere.rikkahub.ui.components.ui.ToggleSurface
 import me.rerere.rikkahub.ui.components.ui.icons.HeartIcon
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.theme.extendColors
@@ -100,6 +102,7 @@ fun ModelSelector(
     modifier: Modifier = Modifier,
     onlyIcon: Boolean = false,
     allowClear: Boolean = false,
+    additionalTypes: Set<ModelType> = emptySet(),
     onSelect: (Model) -> Unit
 ) {
     var popup by remember { mutableStateOf(false) }
@@ -145,23 +148,34 @@ fun ModelSelector(
             }
         }
     } else {
-        IconButton(
-            onClick = {
-                popup = true
-            },
+        ToggleSurface(
+            checked = false,
+            onClick = { popup = true },
+            modifier = modifier,
         ) {
-            if (model != null) {
-                AutoAIIcon(
-                    modifier = Modifier.size(36.dp),
-                    name = model.modelId,
-                    color = Color.Transparent
-                )
-            } else {
-                Icon(
-                    imageVector = HugeIcons.Brain02,
-                    contentDescription = stringResource(R.string.setting_model_page_chat_model),
-                    modifier = Modifier.size(20.dp)
-                )
+            Row(
+                modifier = Modifier.padding(vertical = 8.dp, horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier.size(24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (model != null) {
+                        AutoAIIcon(
+                            modifier = Modifier.size(24.dp),
+                            name = model.modelId,
+                            color = Color.Transparent,
+                            iconPadding = 0.dp,
+                        )
+                    } else {
+                        Icon(
+                            imageVector = HugeIcons.Brain02,
+                            contentDescription = stringResource(R.string.setting_model_page_chat_model),
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
+                }
             }
         }
     }
@@ -181,13 +195,14 @@ fun ModelSelector(
                     .imePadding(),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                val modelTypes = remember(type, additionalTypes) { additionalTypes + type }
                 val filteredProviderSettings = providers.fastFilter {
-                    it.enabled && it.models.fastAny { model -> model.type == type }
+                    it.enabled && it.models.fastAny { model -> model.type in modelTypes }
                 }
                 ModelList(
                     currentModel = modelId,
                     providers = filteredProviderSettings,
-                    modelType = type,
+                    modelTypes = modelTypes,
                     onSelect = {
                         onSelect(it)
                         scope.launch {
@@ -211,7 +226,7 @@ fun ModelSelector(
 private fun ColumnScope.ModelList(
     currentModel: Uuid? = null,
     providers: List<ProviderSetting>,
-    modelType: ModelType,
+    modelTypes: Set<ModelType>,
     onSelect: (Model) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -222,23 +237,23 @@ private fun ColumnScope.ModelList(
 
     val favoriteModels = settings.value.favoriteModels.mapNotNull { modelId ->
         val model = settings.value.providers.findModelById(modelId) ?: return@mapNotNull null
-        if (model.type != modelType) return@mapNotNull null
+        if (model.type !in modelTypes) return@mapNotNull null
         val provider = model.findProvider(providers = settings.value.providers, checkOverwrite = false) ?: return@mapNotNull null
         model to provider
     }
 
     var searchKeywords by remember { mutableStateOf("") }
 
-    val typeFilteredModelsByProvider = remember(providers, modelType) {
+    val typeFilteredModelsByProvider = remember(providers, modelTypes) {
         providers.associate { provider ->
-            provider.id to provider.models.fastFilter { it.type == modelType }
+            provider.id to provider.models.fastFilter { it.type in modelTypes }
         }
     }
 
-    val searchFilteredModelsByProvider = remember(providers, modelType, searchKeywords) {
+    val searchFilteredModelsByProvider = remember(providers, modelTypes, searchKeywords) {
         providers.associate { provider ->
             provider.id to provider.models.fastFilter {
-                it.type == modelType && it.displayName.contains(searchKeywords, true)
+                it.type in modelTypes && it.displayName.contains(searchKeywords, true)
             }
         }
     }

@@ -35,15 +35,24 @@ android {
     productFlavors {
         create("public") {
             dimension = "distribution"
-            versionCode = 177
-            versionName = "v1.2.1"
-            buildConfigField("String", "VERSION_NAME", "\"v1.2.1\"")
-            buildConfigField("String", "VERSION_CODE", "\"177\"")
+            versionCode = 178
+            versionName = "v2.0.1"
+            buildConfigField("String", "VERSION_NAME", "\"v2.0.1\"")
+            buildConfigField("String", "VERSION_CODE", "\"178\"")
         }
         create("personal") {
             dimension = "distribution"
             buildConfigField("String", "VERSION_NAME", "\"${android.defaultConfig.versionName}\"")
             buildConfigField("String", "VERSION_CODE", "\"${android.defaultConfig.versionCode}\"")
+        }
+        // Personal Home test build; keep Jude public/personal variants unchanged.
+        create("home") {
+            dimension = "distribution"
+            applicationId = "io.github.lucien567.lucienhome"
+            versionCode = 1
+            versionName = "0.1.0-dev"
+            buildConfigField("String", "VERSION_NAME", "\"0.1.0-dev\"")
+            buildConfigField("String", "VERSION_CODE", "\"1\"")
         }
     }
 
@@ -118,6 +127,11 @@ android {
     }
     sourceSets {
         getByName("androidTest").assets.srcDirs("$projectDir/schemas")
+        getByName("home") {
+            java.srcDir("src/public/java")
+            res.srcDir("src/public/res")
+            manifest.srcFile("src/public/AndroidManifest.xml")
+        }
     }
     androidResources {
         generateLocaleConfig = true
@@ -138,6 +152,15 @@ android {
         compilerOptions.optIn.add("kotlin.uuid.ExperimentalUuidApi")
         compilerOptions.optIn.add("kotlin.time.ExperimentalTime")
         compilerOptions.optIn.add("kotlinx.coroutines.ExperimentalCoroutinesApi")
+    }
+}
+
+tasks.matching { it.name.startsWith("processHome") && it.name.endsWith("GoogleServices") }
+    .configureEach { enabled = false }
+
+androidComponents {
+    onVariants(selector().withFlavor("distribution" to "home")) {
+        it.sources.kotlin?.addStaticSourceDirectory("src/public/java")
     }
 }
 

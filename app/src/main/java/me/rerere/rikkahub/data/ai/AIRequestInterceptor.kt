@@ -10,7 +10,7 @@ import okhttp3.Request
 import okhttp3.Response
 import kotlin.io.encoding.Base64
 
-class AIRequestInterceptor(private val remoteConfig: FirebaseRemoteConfig) : Interceptor {
+class AIRequestInterceptor(private val remoteConfig: FirebaseRemoteConfig?) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
         var request = chain.request()
         val host = request.url.host

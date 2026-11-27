@@ -7,11 +7,14 @@ import io.ktor.http.HttpHeaders
 import io.pebbletemplates.pebble.PebbleEngine
 import kotlinx.serialization.json.Json
 import me.rerere.ai.provider.ProviderManager
+import me.rerere.ai.provider.providers.GeminiOAuthTokenProvider
 import me.rerere.common.http.RequestLogPrivacy
 import me.rerere.common.http.AcceptLanguageBuilder
 import me.rerere.rikkahub.BuildConfig
 import me.rerere.rikkahub.data.ai.AIRequestInterceptor
 import me.rerere.rikkahub.data.ai.RequestLoggingInterceptor
+import me.rerere.rikkahub.data.ai.gemini.GeminiOAuthAccountRepository
+import me.rerere.rikkahub.data.ai.gemini.GeminiOAuthLoginService
 import me.rerere.rikkahub.data.ai.openai.OpenAICodexAuthService
 import me.rerere.rikkahub.data.ai.transformers.AssistantTemplateLoader
 import me.rerere.rikkahub.data.ai.GenerationHandler
@@ -170,7 +173,7 @@ val dataSourceModule = module {
                 }
             }
             .addNetworkInterceptor(RequestLoggingInterceptor())
-            .addInterceptor(AIRequestInterceptor(remoteConfig = get()))
+            .addInterceptor(AIRequestInterceptor(remoteConfig = if (me.rerere.rikkahub.BuildConfig.FLAVOR == "home") null else get()))
             .addInterceptor { chain ->
                 if (chain.request().tag(RequestLogPrivacy::class.java) != null) chain.proceed(chain.request())
                 else httpLogging.intercept(chain)
@@ -186,10 +189,28 @@ val dataSourceModule = module {
     }
 
     single {
+        GeminiOAuthAccountRepository(
+            context = get(),
+            client = get(),
+            json = get(),
+        )
+    }
+
+    single<GeminiOAuthTokenProvider> { get<GeminiOAuthAccountRepository>() }
+
+    single {
+        GeminiOAuthLoginService(
+            context = get(),
+            accountRepository = get(),
+        )
+    }
+
+    single {
         ProviderManager(
             client = get(),
             context = get(),
             openAICodexTokenProvider = get<OpenAICodexAuthService>(),
+            geminiOAuthTokenProvider = get<GeminiOAuthTokenProvider>(),
         )
     }
 

@@ -340,7 +340,7 @@ class ChatCompletionsAPI(
         val modelAbilities = (params.model.abilities + ModelRegistry.MODEL_ABILITIES.getData(params.model.modelId)).toSet()
         return buildJsonObject {
             put("model", params.model.modelId)
-            put("messages", buildMessages(messages))
+            if (!params.moveMessagesAfterTools) put("messages", buildMessages(messages))
 
             if (isModelAllowTemperature(params.model)) {
                 if (params.temperature != null) put("temperature", params.temperature)
@@ -507,6 +507,7 @@ class ChatCompletionsAPI(
                     }
                 }
             }
+            if (params.moveMessagesAfterTools) put("messages", buildMessages(messages))
         }.mergeCustomBody(params.customBody).also { body ->
             runCatching { params.onRequestPrepared?.invoke(body) }
         }
@@ -798,7 +799,8 @@ class ChatCompletionsAPI(
             promptTokens = jsonObject["prompt_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
             completionTokens = jsonObject["completion_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
             totalTokens = jsonObject["total_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
-            cachedTokens = cached ?: 0
+            cachedTokens = cached ?: 0,
+            cachedTokensReported = cached != null,
         )
     }
 

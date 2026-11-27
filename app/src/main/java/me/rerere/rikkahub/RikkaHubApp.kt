@@ -91,7 +91,7 @@ class RikkaHubApp : Application() {
         syncManagedFiles()
 
         // Init remote config
-        get<FirebaseRemoteConfig>().apply {
+        if (BuildConfig.FLAVOR != "home") get<FirebaseRemoteConfig>().apply {
             setConfigSettingsAsync(remoteConfigSettings {
                 minimumFetchIntervalInSeconds = 1800
             })
