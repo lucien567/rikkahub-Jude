@@ -13,7 +13,7 @@ This is a **separate development APK** built from Jude, not yet a replacement fo
 ## Build on Windows
 
 1. Open the repo in Android Studio with a compatible Android SDK/JDK and let Gradle sync.
-2. Supply your own development `app/google-services.json` according to upstream's build requirements. **Never commit Firebase credentials or private keys.**
+2. The `home` flavor does not require `google-services.json`; its Firebase initialization and analytics events are disabled. Jude's existing flavors retain their Firebase requirements.
 3. Select the `homeDebug` variant and Run on an emulator or a phone connected via USB / wireless debugging; or run:
 
    ```powershell
@@ -31,4 +31,4 @@ This is a **separate development APK** built from Jude, not yet a replacement fo
 
 ## Verification status
 
-Not yet compiled or device-tested in this PR. The first check is `:app:assembleHomeDebug` in Android Studio, followed by an actual phone smoke test.
+Run `:app:assembleHomeDebug`, then smoke-test startup, chat and model settings on a phone.

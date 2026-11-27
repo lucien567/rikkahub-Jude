@@ -127,6 +127,11 @@ android {
     }
     sourceSets {
         getByName("androidTest").assets.srcDirs("$projectDir/schemas")
+        getByName("home") {
+            java.srcDir("src/public/java")
+            res.srcDir("src/public/res")
+            manifest.srcFile("src/public/AndroidManifest.xml")
+        }
     }
     androidResources {
         generateLocaleConfig = true
@@ -147,6 +152,15 @@ android {
         compilerOptions.optIn.add("kotlin.uuid.ExperimentalUuidApi")
         compilerOptions.optIn.add("kotlin.time.ExperimentalTime")
         compilerOptions.optIn.add("kotlinx.coroutines.ExperimentalCoroutinesApi")
+    }
+}
+
+tasks.matching { it.name.startsWith("processHome") && it.name.endsWith("GoogleServices") }
+    .configureEach { enabled = false }
+
+androidComponents {
+    onVariants(selector().withFlavor("distribution" to "home")) {
+        it.sources.kotlin?.addStaticSourceDirectory("src/public/java")
     }
 }
 

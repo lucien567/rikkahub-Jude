@@ -34,7 +34,7 @@ val viewModelModule = module {
             conversationRepo = get(),
             chatService = get(),
             updateChecker = get(),
-            analytics = get(),
+            analytics = if (me.rerere.rikkahub.BuildConfig.FLAVOR == "home") null else get(),
             filesManager = get(),
             favoriteRepository = get(),
         )

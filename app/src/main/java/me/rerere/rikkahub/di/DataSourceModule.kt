@@ -170,7 +170,7 @@ val dataSourceModule = module {
                 }
             }
             .addNetworkInterceptor(RequestLoggingInterceptor())
-            .addInterceptor(AIRequestInterceptor(remoteConfig = get()))
+            .addInterceptor(AIRequestInterceptor(remoteConfig = if (me.rerere.rikkahub.BuildConfig.FLAVOR == "home") null else get()))
             .addInterceptor { chain ->
                 if (chain.request().tag(RequestLogPrivacy::class.java) != null) chain.proceed(chain.request())
                 else httpLogging.intercept(chain)
